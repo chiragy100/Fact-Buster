@@ -1,311 +1,306 @@
-const jwt = require('jsonwebtoken');
-const User = require('../models/User');
-const Game = require('../models/Game');
+const socketIo = require('socket.io');
+const admin = require('firebase-admin');
+const multiplayerService = require('../services/multiplayerService');
 
-const socketHandler = (io) => {
-  // Store active connections
-  const activeConnections = new Map();
-  const gameRooms = new Map();
+let io;
 
-  // Authentication middleware
+const initializeSocket = (server) => {
+  io = socketIo(server, {
+    cors: {
+      origin: "http://localhost:3000",
+      methods: ["GET", "POST"]
+    }
+  });
+
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token;
-      if (!token) {
+      const username = socket.handshake.auth.username;
+      const isGuest = socket.handshake.auth.isGuest;
+
+      if (isGuest) {
+        socket.userId = `guest_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        socket.username = username || 'Guest';
+        socket.isGuest = true;
+      } else if (token) {
+        // Verify Firebase ID token
+        if (admin.apps.length) {
+          try {
+            const decodedToken = await admin.auth().verifyIdToken(token);
+            socket.userId = decodedToken.uid;
+            socket.username = decodedToken.name || decodedToken.display_name || 'User';
+            socket.isGuest = false;
+          } catch (firebaseError) {
+            console.error('Firebase token verification error:', firebaseError);
+            return next(new Error('Invalid Firebase token'));
+          }
+        } else {
+          // Mock authentication for development
+          socket.userId = 'mock-user-id';
+          socket.username = username || 'User';
+        socket.isGuest = false;
+        }
+      } else {
         return next(new Error('Authentication error'));
       }
 
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-      const user = await User.findById(decoded.user.id);
-      
-      if (!user) {
-        return next(new Error('User not found'));
-      }
-
-      socket.userId = user.id;
-      socket.username = user.username;
+      // Store connection
+      multiplayerService.storePlayerConnection(socket.userId, socket.id);
       next();
     } catch (error) {
+      console.error('Socket authentication error:', error);
       next(new Error('Authentication error'));
     }
   });
 
   io.on('connection', (socket) => {
-    console.log(`User connected: ${socket.username} (${socket.userId})`);
-    
-    // Store connection
-    activeConnections.set(socket.userId, socket.id);
+    console.log(`🔌 User connected: ${socket.username} (${socket.userId})`);
 
-    // Join user to their active games
-    socket.on('join-games', async () => {
+    // Join game room
+    socket.on('join-game-room', async ({ roomCode }) => {
       try {
-        const activeGames = await Game.find({
-          'players.userId': socket.userId,
-          status: { $in: ['waiting', 'active'] }
-        });
-
-        activeGames.forEach(game => {
-          socket.join(`game-${game._id}`);
-          gameRooms.set(socket.userId, game._id);
-        });
-
-        socket.emit('games-joined', { gameIds: activeGames.map(g => g._id) });
-      } catch (error) {
-        console.error('Join games error:', error);
-      }
-    });
-
-    // Join specific game room
-    socket.on('join-game', async (gameId) => {
-      try {
-        const game = await Game.findById(gameId);
-        if (!game) {
-          socket.emit('error', { message: 'Game not found' });
+        console.log(`👥 ${socket.username} joining room: ${roomCode}`);
+        
+        // Get room info
+        const gameRoom = await multiplayerService.getGameByRoomCode(roomCode);
+        if (!gameRoom) {
+          socket.emit('error', { message: 'Room not found' });
           return;
         }
 
-        const isPlayer = game.players.some(p => p.userId.toString() === socket.userId);
-        if (!isPlayer) {
-          socket.emit('error', { message: 'Not a player in this game' });
-          return;
-        }
-
-        socket.join(`game-${gameId}`);
-        gameRooms.set(socket.userId, gameId);
+        // Join socket room
+        socket.join(roomCode);
+        socket.roomCode = roomCode;
 
         // Notify other players
-        socket.to(`game-${gameId}`).emit('player-joined', {
-          userId: socket.userId,
-          username: socket.username
+        socket.to(roomCode).emit('player-joined', {
+          player: {
+            userId: socket.userId,
+            username: socket.username,
+            isHost: false
+          },
+          updatedRoom: gameRoom
         });
 
-        socket.emit('game-joined', { gameId });
+        console.log(`✅ ${socket.username} joined room: ${roomCode}`);
       } catch (error) {
-        console.error('Join game error:', error);
-        socket.emit('error', { message: 'Failed to join game' });
+        console.error('❌ Error joining game room:', error);
+        socket.emit('error', { message: 'Failed to join room' });
       }
     });
 
-    // Player ready
-    socket.on('player-ready', async (gameId) => {
+    // Start game
+    socket.on('start-game', async ({ roomCode }) => {
       try {
-        const game = await Game.findById(gameId);
-        if (!game) {
-          socket.emit('error', { message: 'Game not found' });
+        console.log(`🚀 Starting game in room: ${roomCode}`);
+        
+        const gameRoom = await multiplayerService.getGameByRoomCode(roomCode);
+        if (!gameRoom) {
+          socket.emit('error', { message: 'Room not found' });
           return;
         }
 
-        const player = game.players.find(p => p.userId.toString() === socket.userId);
-        if (!player) {
-          socket.emit('error', { message: 'Not a player in this game' });
+        // Check if user is host
+        if (gameRoom.hostId !== socket.userId) {
+          socket.emit('error', { message: 'Only host can start the game' });
           return;
         }
 
-        player.isReady = true;
-        await game.save();
-
-        // Notify all players in the game
-        io.to(`game-${gameId}`).emit('player-ready-update', {
-          userId: socket.userId,
-          username: socket.username,
-          isReady: true
+        // Start game
+        const { gameRoom: updatedRoom, firstQuestion } = await multiplayerService.startGame(roomCode);
+        
+        // Notify all players
+        io.to(roomCode).emit('game-started', {
+          question: firstQuestion,
+          updatedRoom: updatedRoom
         });
 
-        // Check if game can start
-        if (game.isReadyToStart()) {
-          // Start the game after a short delay
-          setTimeout(async () => {
-            try {
-              const updatedGame = await Game.findById(gameId);
-              if (updatedGame && updatedGame.status === 'waiting') {
-                updatedGame.status = 'active';
-                updatedGame.startTime = new Date();
-                await updatedGame.save();
+        // Start round timer
+        startRoundTimer(roomCode, 30);
 
-                io.to(`game-${gameId}`).emit('game-started', {
-                  gameId,
-                  startTime: updatedGame.startTime,
-                  facts: updatedGame.facts
-                });
-              }
-            } catch (error) {
-              console.error('Start game error:', error);
-            }
-          }, 3000);
-        }
+        console.log(`✅ Game started in room: ${roomCode}`);
       } catch (error) {
-        console.error('Player ready error:', error);
-        socket.emit('error', { message: 'Failed to mark player ready' });
+        console.error('❌ Error starting game:', error);
+        socket.emit('error', { message: error.message || 'Failed to start game' });
       }
     });
 
     // Submit answer
-    socket.on('submit-answer', async (data) => {
+    socket.on('submit-answer', async ({ roomCode, answer, timeSpent }) => {
       try {
-        const { gameId, factId, guess, responseTime } = data;
-        const game = await Game.findById(gameId);
+        console.log(`📝 ${socket.username} submitted answer in room: ${roomCode}`);
         
-        if (!game) {
-          socket.emit('error', { message: 'Game not found' });
+        const result = await multiplayerService.submitAnswer(roomCode, socket.userId, answer, timeSpent);
+        
+        if (!result) {
+          socket.emit('error', { message: 'Failed to submit answer' });
           return;
         }
 
-        if (game.status !== 'active') {
-          socket.emit('error', { message: 'Game is not active' });
-          return;
-        }
-
-        // Submit answer
-        const result = game.submitAnswer(socket.userId, factId, guess, responseTime);
-        await game.save();
-
-        // Notify all players about the answer
-        io.to(`game-${gameId}`).emit('answer-submitted', {
-          userId: socket.userId,
-          username: socket.username,
-          factId,
-          isCorrect: result.isCorrect,
-          points: result.points,
-          newScore: result.newScore
+        // Notify other players
+        socket.to(roomCode).emit('player-answered', {
+          player: {
+            userId: socket.userId,
+            username: socket.username
+          },
+          timeSpent
         });
 
         // Check if all players have answered
-        const currentFact = game.facts[game.currentRound];
-        if (currentFact && currentFact.factId.toString() === factId) {
-          const answeredPlayers = game.answers.filter(
-            a => a.factId.toString() === factId
-          ).length;
-
-          if (answeredPlayers >= game.players.length) {
-                         // All players have answered, show results
-             setTimeout(async () => {
-               io.to(`game-${gameId}`).emit('fact-results', {
-                 factId,
-                 correctAnswer: currentFact.isReal,
-                 explanation: currentFact.explanation,
-                 playerResults: game.answers
-                   .filter(a => a.factId.toString() === factId)
-                   .map(a => ({
-                     userId: a.playerId,
-                     guess: a.guess,
-                     isCorrect: a.isCorrect,
-                     points: a.points,
-                     responseTime: a.responseTime
-                   }))
-               });
-
-               // Move to next fact or end game
-               game.currentRound += 1;
-               if (game.currentRound >= game.facts.length) {
-                 // Game finished
-                 game.status = 'finished';
-                 game.endTime = new Date();
-                 const results = game.getResults();
-                 game.winner = results.winner.userId;
-                 
-                 try {
-                   await game.save();
-                 } catch (error) {
-                   console.error('Save game error:', error);
-                 }
-
-                 io.to(`game-${gameId}`).emit('game-finished', {
-                   gameId,
-                   results,
-                   endTime: game.endTime
-                 });
-               } else {
-                 // Next fact
-                 setTimeout(() => {
-                   io.to(`game-${gameId}`).emit('next-fact', {
-                     fact: game.facts[game.currentRound],
-                     round: game.currentRound + 1,
-                     totalRounds: game.facts.length
-                   });
-                 }, 3000);
-               }
-             }, 2000);
-          }
+        const activeGame = multiplayerService.activeGames.get(roomCode);
+        if (activeGame && activeGame.room.currentPlayers.length === activeGame.roundAnswers.size) {
+          // All players answered, end round
+          setTimeout(() => endRound(roomCode), 2000);
         }
+
       } catch (error) {
-        console.error('Submit answer error:', error);
+        console.error('❌ Error submitting answer:', error);
         socket.emit('error', { message: 'Failed to submit answer' });
       }
     });
 
-    // Chat message
-    socket.on('chat-message', (data) => {
-      const { gameId, message } = data;
-      io.to(`game-${gameId}`).emit('chat-message', {
-        userId: socket.userId,
-        username: socket.username,
-        message,
-        timestamp: new Date()
-      });
-    });
-
-    // Emoji reaction
-    socket.on('emoji-reaction', (data) => {
-      const { gameId, emoji } = data;
-      io.to(`game-${gameId}`).emit('emoji-reaction', {
-        userId: socket.userId,
-        username: socket.username,
-        emoji,
-        timestamp: new Date()
-      });
-    });
-
-    // Leave game
-    socket.on('leave-game', async (gameId) => {
+    // Leave game room
+    socket.on('leave-game-room', async ({ roomCode }) => {
       try {
-        socket.leave(`game-${gameId}`);
-        gameRooms.delete(socket.userId);
-
-        const game = await Game.findById(gameId);
-        if (game && game.status === 'waiting') {
-          game.removePlayer(socket.userId);
-          await game.save();
-
-          io.to(`game-${gameId}`).emit('player-left', {
-            userId: socket.userId,
-            username: socket.username
+        console.log(`👋 ${socket.username} leaving room: ${roomCode}`);
+        
+        const result = await multiplayerService.leaveRoom(roomCode, socket.userId);
+        
+        if (result) {
+          // Notify other players
+          socket.to(roomCode).emit('player-left', {
+            player: {
+              userId: socket.userId,
+              username: socket.username
+            },
+            updatedRoom: result.gameRoom
           });
+
+          // Leave socket room
+          socket.leave(roomCode);
+          socket.roomCode = null;
         }
+
+        console.log(`✅ ${socket.username} left room: ${roomCode}`);
       } catch (error) {
-        console.error('Leave game error:', error);
+        console.error('❌ Error leaving game room:', error);
       }
     });
 
     // Disconnect
     socket.on('disconnect', async () => {
-      console.log(`User disconnected: ${socket.username} (${socket.userId})`);
+      console.log(`🔌 User disconnected: ${socket.username} (${socket.userId})`);
       
-      activeConnections.delete(socket.userId);
+      // Remove connection
+      multiplayerService.removePlayerConnection(socket.userId);
       
-      // Handle player disconnection from games
-      const gameId = gameRooms.get(socket.userId);
-      if (gameId) {
+      // Leave room if in one
+      if (socket.roomCode) {
         try {
-          const game = await Game.findById(gameId);
-          if (game && game.status === 'waiting') {
-            game.removePlayer(socket.userId);
-            await game.save();
-
-            io.to(`game-${gameId}`).emit('player-disconnected', {
-              userId: socket.userId,
-              username: socket.username
+          const result = await multiplayerService.leaveRoom(socket.roomCode, socket.userId);
+          
+          if (result) {
+            // Notify other players
+            socket.to(socket.roomCode).emit('player-left', {
+              player: {
+                userId: socket.userId,
+                username: socket.username
+              },
+              updatedRoom: result.gameRoom
             });
           }
         } catch (error) {
-          console.error('Handle disconnect error:', error);
+          console.error('❌ Error handling disconnect:', error);
         }
-        
-        gameRooms.delete(socket.userId);
       }
     });
   });
 
-  return { activeConnections, gameRooms };
+  console.log('📡 Socket.io server initialized');
+  return io;
 };
 
-module.exports = socketHandler; 
+// Round timer management
+const roundTimers = new Map();
+
+const startRoundTimer = (roomCode, duration) => {
+  // Clear existing timer
+  if (roundTimers.has(roomCode)) {
+    clearInterval(roundTimers.get(roomCode));
+  }
+
+  let timeLeft = duration;
+  
+  // Send initial time
+  io.to(roomCode).emit('time-update', { timeLeft });
+  
+  const timer = setInterval(() => {
+    timeLeft--;
+    
+    // Send time update
+    io.to(roomCode).emit('time-update', { timeLeft });
+    
+    if (timeLeft <= 0) {
+      clearInterval(timer);
+      roundTimers.delete(roomCode);
+      
+      // End round
+      endRound(roomCode);
+    }
+  }, 1000);
+  
+  roundTimers.set(roomCode, timer);
+};
+
+const endRound = async (roomCode) => {
+  try {
+    console.log(`🏁 Ending round in room: ${roomCode}`);
+    
+    // Clear timer
+    if (roundTimers.has(roomCode)) {
+      clearInterval(roundTimers.get(roomCode));
+      roundTimers.delete(roomCode);
+    }
+    
+    const result = await multiplayerService.endRound(roomCode);
+    
+    if (result.gameFinished) {
+      // Game finished
+      io.to(roomCode).emit('round-finished', {
+        results: result.roundResults,
+        gameFinished: true,
+        updatedRoom: result.gameRoom
+      });
+      
+      console.log(`🏆 Game finished in room: ${roomCode}`);
+    } else {
+      // Next round
+      io.to(roomCode).emit('round-finished', {
+        results: result.roundResults,
+        nextQuestion: result.nextQuestion,
+        gameFinished: false,
+        updatedRoom: result.gameRoom
+      });
+      
+      // Start timer for next round
+      setTimeout(() => {
+        startRoundTimer(roomCode, 30);
+      }, 5000);
+      
+      console.log(`🔄 Round ended, next round starting in room: ${roomCode}`);
+    }
+  } catch (error) {
+    console.error('❌ Error ending round:', error);
+  }
+};
+
+// Cleanup inactive games periodically
+setInterval(async () => {
+  try {
+    await multiplayerService.cleanupInactiveGames();
+  } catch (error) {
+    console.error('❌ Error cleaning up games:', error);
+  }
+}, 5 * 60 * 1000); // Every 5 minutes
+
+module.exports = { initializeSocket }; 

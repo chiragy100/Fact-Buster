@@ -1,172 +1,188 @@
 const express = require('express');
-const User = require('../models/User');
-const Game = require('../models/Game');
-
 const router = express.Router();
 
-// @route   GET /api/leaderboard/global
-// @desc    Get global leaderboard
+// In-memory mock leaderboard data
+const mockSessions = [];
+
+// @route   POST /api/leaderboard/session
+// @desc    Record a new game session
 // @access  Public
-router.get('/global', async (req, res) => {
+router.post('/session', async (req, res) => {
   try {
-    const { page = 1, limit = 20, sortBy = 'totalScore' } = req.query;
-    const skip = (page - 1) * limit;
+    const {
+      username,
+      score,
+      totalFacts,
+      category,
+      isGuest = true,
+      longestStreak = 0,
+      currentStreak = 0,
+      streakHistory = [],
+      accuracy = 0,
+    } = req.body;
 
-    // Validate sortBy parameter
-    const validSortFields = ['totalScore', 'correctAnswers', 'bestStreak', 'gamesPlayed'];
-    const sortField = validSortFields.includes(sortBy) ? sortBy : 'totalScore';
+    if (!username || score === undefined || !totalFacts || !category) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
 
-    const sortCriteria = {};
-    sortCriteria[`stats.${sortField}`] = -1;
+    // Generate unique session ID
+    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const completedAt = new Date();
 
-    const users = await User.find({ isAnonymous: false })
-      .select('username avatar stats')
-      .sort(sortCriteria)
-      .skip(skip)
-      .limit(parseInt(limit));
+    const session = {
+      id: sessionId,
+      username,
+      score,
+      totalFacts,
+      category,
+      isGuest,
+      longestStreak,
+      currentStreak,
+      streakHistory,
+      accuracy,
+      completedAt,
+    };
+    mockSessions.push(session);
 
-    const total = await User.countDocuments({ isAnonymous: false });
-
-    // Calculate ranks
-    const usersWithRanks = users.map((user, index) => ({
-      rank: skip + index + 1,
-      username: user.username,
-      avatar: user.avatar,
-      stats: {
-        ...user.stats,
-        accuracy: user.getAccuracy()
-      }
-    }));
-
-    res.json({
-      leaderboard: usersWithRanks,
-      pagination: {
-        current: parseInt(page),
-        total: Math.ceil(total / limit),
-        hasMore: skip + users.length < total
-      },
-      sortBy
+    res.status(201).json({
+      message: 'Game session recorded successfully',
+      session,
     });
   } catch (error) {
-    console.error('Get global leaderboard error:', error);
+    console.error('Record game session error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// @route   GET /api/leaderboard/category
-// @desc    Get category-specific leaderboard
+// @route   GET /api/leaderboard
+// @desc    Get global leaderboard
 // @access  Public
-router.get('/category/:category', async (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const { category } = req.params;
-    const { page = 1, limit = 20 } = req.query;
-    const skip = (page - 1) * limit;
-
-    // Validate category
-    const validCategories = ['geography', 'sports', 'space', 'history', 'science', 'pop-culture'];
-    if (!validCategories.includes(category)) {
-      return res.status(400).json({ message: 'Invalid category' });
+    const { limit = 10, offset = 0 } = req.query;
+    // Group by username and get best score, best streak, etc.
+    const leaderboardMap = {};
+    for (const session of mockSessions) {
+      if (!leaderboardMap[session.username]) {
+        leaderboardMap[session.username] = {
+          username: session.username,
+          bestScore: session.score,
+          bestStreak: session.longestStreak,
+          totalGames: 1,
+          totalScore: session.score,
+          accuracySum: session.accuracy || 0,
+          accuracyCount: session.accuracy !== undefined ? 1 : 0,
+          lastPlayed: session.completedAt,
+        };
+      } else {
+        const entry = leaderboardMap[session.username];
+        entry.bestScore = Math.max(entry.bestScore, session.score);
+        entry.bestStreak = Math.max(entry.bestStreak, session.longestStreak);
+        entry.totalGames += 1;
+        entry.totalScore += session.score;
+        entry.accuracySum += session.accuracy || 0;
+        entry.accuracyCount += session.accuracy !== undefined ? 1 : 0;
+        if (session.completedAt > entry.lastPlayed) {
+          entry.lastPlayed = session.completedAt;
+        }
+      }
     }
-
-    // Get users who have played games in this category
-    const users = await User.aggregate([
-      {
-        $lookup: {
-          from: 'games',
-          localField: '_id',
-          foreignField: 'players.userId',
-          as: 'games'
-        }
-      },
-      {
-        $unwind: '$games'
-      },
-      {
-        $match: {
-          'games.settings.categories': category,
-          'games.status': 'finished',
-          isAnonymous: false
-        }
-      },
-      {
-        $group: {
-          _id: '$_id',
-          username: { $first: '$username' },
-          avatar: { $first: '$avatar' },
-          totalScore: { $sum: '$games.players.score' },
-          gamesPlayed: { $sum: 1 },
-          correctAnswers: { $sum: '$games.players.correctAnswers' },
-          totalAnswers: { $sum: '$games.players.totalAnswers' }
-        }
-      },
-      {
-        $addFields: {
-          accuracy: {
-            $cond: [
-              { $eq: ['$totalAnswers', 0] },
-              0,
-              { $multiply: [{ $divide: ['$correctAnswers', '$totalAnswers'] }, 100] }
-            ]
-          }
-        }
-      },
-      {
-        $sort: { totalScore: -1 }
-      },
-      {
-        $skip: skip
-      },
-      {
-        $limit: parseInt(limit)
-      }
-    ]);
-
-    const total = await User.aggregate([
-      {
-        $lookup: {
-          from: 'games',
-          localField: '_id',
-          foreignField: 'players.userId',
-          as: 'games'
-        }
-      },
-      {
-        $unwind: '$games'
-      },
-      {
-        $match: {
-          'games.settings.categories': category,
-          'games.status': 'finished',
-          isAnonymous: false
-        }
-      },
-      {
-        $group: {
-          _id: '$_id'
-        }
-      },
-      {
-        $count: 'total'
-      }
-    ]);
-
-    // Calculate ranks
-    const usersWithRanks = users.map((user, index) => ({
-      rank: skip + index + 1,
-      ...user
-    }));
-
+    let leaderboard = Object.values(leaderboardMap);
+    leaderboard = leaderboard.sort((a, b) => b.bestScore - a.bestScore || b.lastPlayed - a.lastPlayed);
+    const paged = leaderboard.slice(Number(offset), Number(offset) + Number(limit));
     res.json({
-      leaderboard: usersWithRanks,
-      category,
-      pagination: {
-        current: parseInt(page),
-        total: Math.ceil((total[0]?.total || 0) / limit),
-        hasMore: skip + users.length < (total[0]?.total || 0)
-      }
+      leaderboard: paged.map(entry => ({
+        id: entry.username,
+        username: entry.username,
+        bestScore: entry.bestScore,
+        bestStreak: entry.bestStreak,
+        totalGames: entry.totalGames,
+        totalScore: entry.totalScore,
+        averageAccuracy: entry.accuracyCount ? Math.round(entry.accuracySum / entry.accuracyCount) : 0,
+        lastPlayed: entry.lastPlayed,
+      })),
+      total: leaderboard.length,
     });
   } catch (error) {
-    console.error('Get category leaderboard error:', error);
+    console.error('Get leaderboard error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/leaderboard/streaks
+// @desc    Get global streak leaderboard
+// @access  Public
+router.get('/streaks', async (req, res) => {
+  try {
+    const { limit = 10, offset = 0 } = req.query;
+    // Group by username and get best streak
+    const streakMap = {};
+    for (const session of mockSessions) {
+      if (!streakMap[session.username]) {
+        streakMap[session.username] = {
+          username: session.username,
+          bestStreak: session.longestStreak,
+          totalGames: 1,
+          totalScore: session.score,
+          accuracySum: session.accuracy || 0,
+          accuracyCount: session.accuracy !== undefined ? 1 : 0,
+          lastPlayed: session.completedAt,
+        };
+      } else {
+        const entry = streakMap[session.username];
+        entry.bestStreak = Math.max(entry.bestStreak, session.longestStreak);
+        entry.totalGames += 1;
+        entry.totalScore += session.score;
+        entry.accuracySum += session.accuracy || 0;
+        entry.accuracyCount += session.accuracy !== undefined ? 1 : 0;
+        if (session.completedAt > entry.lastPlayed) {
+          entry.lastPlayed = session.completedAt;
+        }
+      }
+    }
+    let leaderboard = Object.values(streakMap);
+    leaderboard = leaderboard.sort((a, b) => b.bestStreak - a.bestStreak || b.lastPlayed - a.lastPlayed);
+    const paged = leaderboard.slice(Number(offset), Number(offset) + Number(limit));
+    res.json({
+      leaderboard: paged.map(entry => ({
+        id: entry.username,
+        username: entry.username,
+        bestStreak: entry.bestStreak,
+        totalGames: entry.totalGames,
+        totalScore: entry.totalScore,
+        averageAccuracy: entry.accuracyCount ? Math.round(entry.accuracySum / entry.accuracyCount) : 0,
+        lastPlayed: entry.lastPlayed,
+      })),
+      total: leaderboard.length,
+    });
+  } catch (error) {
+    console.error('Get streak leaderboard error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/leaderboard/recent
+// @desc    Get recent game sessions
+// @access  Public
+router.get('/recent', async (req, res) => {
+  try {
+    const { limit = 20 } = req.query;
+    const sorted = mockSessions.slice().sort((a, b) => b.completedAt - a.completedAt);
+    const recentSessions = sorted.slice(0, Number(limit));
+    res.json({
+      recentSessions: recentSessions.map(session => ({
+        id: session.id,
+        username: session.username,
+        score: session.score,
+        totalFacts: session.totalFacts,
+        category: session.category,
+        completedAt: session.completedAt,
+        accuracy: session.accuracy,
+        longestStreak: session.longestStreak,
+      })),
+    });
+  } catch (error) {
+    console.error('Get recent sessions error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -176,193 +192,56 @@ router.get('/category/:category', async (req, res) => {
 // @access  Public
 router.get('/weekly', async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
-    const skip = (page - 1) * limit;
-
-    // Get start of current week (Monday)
-    const now = new Date();
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay() + 1);
-    startOfWeek.setHours(0, 0, 0, 0);
-
-    const users = await User.aggregate([
-      {
-        $lookup: {
-          from: 'games',
-          localField: '_id',
-          foreignField: 'players.userId',
-          as: 'games'
+    const { limit = 10, offset = 0 } = req.query;
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+    // Filter sessions from the last 7 days
+    const weeklySessions = mockSessions.filter(session => session.completedAt >= oneWeekAgo);
+    // Group by username
+    const weeklyMap = {};
+    for (const session of weeklySessions) {
+      if (!weeklyMap[session.username]) {
+        weeklyMap[session.username] = {
+          username: session.username,
+          bestScore: session.score,
+          bestStreak: session.longestStreak,
+          totalGames: 1,
+          totalScore: session.score,
+          accuracySum: session.accuracy || 0,
+          accuracyCount: session.accuracy !== undefined ? 1 : 0,
+          lastPlayed: session.completedAt,
+        };
+      } else {
+        const entry = weeklyMap[session.username];
+        entry.bestScore = Math.max(entry.bestScore, session.score);
+        entry.bestStreak = Math.max(entry.bestStreak, session.longestStreak);
+        entry.totalGames += 1;
+        entry.totalScore += session.score;
+        entry.accuracySum += session.accuracy || 0;
+        entry.accuracyCount += session.accuracy !== undefined ? 1 : 0;
+        if (session.completedAt > entry.lastPlayed) {
+          entry.lastPlayed = session.completedAt;
         }
-      },
-      {
-        $unwind: '$games'
-      },
-      {
-        $match: {
-          'games.endTime': { $gte: startOfWeek },
-          'games.status': 'finished',
-          isAnonymous: false
-        }
-      },
-      {
-        $group: {
-          _id: '$_id',
-          username: { $first: '$username' },
-          avatar: { $first: '$avatar' },
-          weeklyScore: { $sum: '$games.players.score' },
-          weeklyGames: { $sum: 1 },
-          weeklyCorrect: { $sum: '$games.players.correctAnswers' },
-          weeklyTotal: { $sum: '$games.players.totalAnswers' }
-        }
-      },
-      {
-        $addFields: {
-          weeklyAccuracy: {
-            $cond: [
-              { $eq: ['$weeklyTotal', 0] },
-              0,
-              { $multiply: [{ $divide: ['$weeklyCorrect', '$weeklyTotal'] }, 100] }
-            ]
-          }
-        }
-      },
-      {
-        $sort: { weeklyScore: -1 }
-      },
-      {
-        $skip: skip
-      },
-      {
-        $limit: parseInt(limit)
       }
-    ]);
-
-    const total = await User.aggregate([
-      {
-        $lookup: {
-          from: 'games',
-          localField: '_id',
-          foreignField: 'players.userId',
-          as: 'games'
-        }
-      },
-      {
-        $unwind: '$games'
-      },
-      {
-        $match: {
-          'games.endTime': { $gte: startOfWeek },
-          'games.status': 'finished',
-          isAnonymous: false
-        }
-      },
-      {
-        $group: {
-          _id: '$_id'
-        }
-      },
-      {
-        $count: 'total'
-      }
-    ]);
-
-    // Calculate ranks
-    const usersWithRanks = users.map((user, index) => ({
-      rank: skip + index + 1,
-      ...user
-    }));
-
+    }
+    let leaderboard = Object.values(weeklyMap);
+    leaderboard = leaderboard.sort((a, b) => b.bestScore - a.bestScore || b.lastPlayed - a.lastPlayed);
+    const paged = leaderboard.slice(Number(offset), Number(offset) + Number(limit));
     res.json({
-      leaderboard: usersWithRanks,
-      weekStart: startOfWeek,
-      pagination: {
-        current: parseInt(page),
-        total: Math.ceil((total[0]?.total || 0) / limit),
-        hasMore: skip + users.length < (total[0]?.total || 0)
-      }
+      leaderboard: paged.map(entry => ({
+        id: entry.username,
+        username: entry.username,
+        bestScore: entry.bestScore,
+        bestStreak: entry.bestStreak,
+        totalGames: entry.totalGames,
+        totalScore: entry.totalScore,
+        averageAccuracy: entry.accuracyCount ? Math.round(entry.accuracySum / entry.accuracyCount) : 0,
+        lastPlayed: entry.lastPlayed,
+      })),
+      total: leaderboard.length,
     });
   } catch (error) {
     console.error('Get weekly leaderboard error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// @route   GET /api/leaderboard/user/:userId
-// @desc    Get user's ranking and stats
-// @access  Public
-router.get('/user/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    const user = await User.findById(userId)
-      .select('username avatar stats');
-
-    if (!user) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    // Get global rank
-    const globalRank = await User.countDocuments({
-      'stats.totalScore': { $gt: user.stats.totalScore },
-      isAnonymous: false
-    }) + 1;
-
-    // Get category rankings
-    const categories = ['geography', 'sports', 'space', 'history', 'science', 'pop-culture'];
-    const categoryRanks = await Promise.all(
-      categories.map(async (category) => {
-        const categoryUsers = await User.aggregate([
-          {
-            $lookup: {
-              from: 'games',
-              localField: '_id',
-              foreignField: 'players.userId',
-              as: 'games'
-            }
-          },
-          {
-            $unwind: '$games'
-          },
-          {
-            $match: {
-              'games.settings.categories': category,
-              'games.status': 'finished',
-              isAnonymous: false
-            }
-          },
-          {
-            $group: {
-              _id: '$_id',
-              totalScore: { $sum: '$games.players.score' }
-            }
-          },
-          {
-            $sort: { totalScore: -1 }
-          }
-        ]);
-
-        const userRank = categoryUsers.findIndex(u => u._id.toString() === userId) + 1;
-        return {
-          category,
-          rank: userRank > 0 ? userRank : null,
-          totalPlayers: categoryUsers.length
-        };
-      })
-    );
-
-    res.json({
-      user: {
-        ...user.toObject(),
-        stats: {
-          ...user.stats,
-          accuracy: user.getAccuracy()
-        }
-      },
-      globalRank,
-      categoryRanks
-    });
-  } catch (error) {
-    console.error('Get user ranking error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

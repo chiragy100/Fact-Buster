@@ -1,6 +1,11 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import axios from 'axios';
-import toast from 'react-hot-toast';
+import { 
+  onAuthStateChange, 
+  getCurrentUser,
+  logoutUser 
+} from '../services/firebaseAuth';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '../firebase/config';
 
 const AuthContext = createContext();
 
@@ -13,126 +18,105 @@ export const useAuth = () => {
 };
 
 export const AuthProvider = ({ children }) => {
-  const [user, setUser] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [userData, setUserData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [token, setToken] = useState(localStorage.getItem('token'));
 
-  // Set up axios defaults
   useEffect(() => {
-    if (token) {
-      axios.defaults.headers.common['x-auth-token'] = token;
-    } else {
-      delete axios.defaults.headers.common['x-auth-token'];
-    }
-  }, [token]);
-
-  // Load user on mount
-  useEffect(() => {
-    const loadUser = async () => {
-      if (token) {
+    const unsubscribe = onAuthStateChange(async (user) => {
+      console.log('Auth state changed:', user ? 'User logged in' : 'User logged out');
+      if (user) {
+        console.log('Setting current user:', user);
+        setCurrentUser(user);
+        
+        // Get user data from Firestore
         try {
-          const response = await axios.get('/api/auth/me');
-          setUser(response.data);
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          if (userDoc.exists()) {
+            console.log('User data from Firestore:', userDoc.data());
+            setUserData(userDoc.data());
+          } else {
+            // If user document doesn't exist, create basic user data
+            const basicUserData = {
+              uid: user.uid,
+              username: user.displayName || 'User',
+              email: user.email,
+              emailVerified: user.emailVerified,
+              stats: {
+                gamesPlayed: 0,
+                totalScore: 0,
+                correctAnswers: 0,
+                totalAnswers: 0,
+                bestStreak: 0,
+                averageResponseTime: 0
+              },
+              preferences: {
+                favoriteCategories: [],
+                difficulty: 'medium'
+              }
+            };
+            console.log('Setting basic user data:', basicUserData);
+            setUserData(basicUserData);
+          }
         } catch (error) {
-          console.error('Load user error:', error);
-          localStorage.removeItem('token');
-          setToken(null);
+          console.error('Error fetching user data:', error);
+          const fallbackUserData = {
+            uid: user.uid,
+            username: user.displayName || 'User',
+            email: user.email,
+            emailVerified: user.emailVerified,
+            stats: {
+              gamesPlayed: 0,
+              totalScore: 0,
+              correctAnswers: 0,
+              totalAnswers: 0,
+              bestStreak: 0,
+              averageResponseTime: 0
+            },
+            preferences: {
+              favoriteCategories: [],
+              difficulty: 'medium'
+            }
+          };
+          console.log('Setting fallback user data:', fallbackUserData);
+          setUserData(fallbackUserData);
         }
+      } else {
+        console.log('Clearing user data');
+        setCurrentUser(null);
+        setUserData(null);
       }
       setLoading(false);
-    };
+    });
 
-    loadUser();
-  }, [token]);
+    return unsubscribe;
+  }, []);
 
-  // Register user
-  const register = async (userData) => {
+  const logout = async () => {
     try {
-      const response = await axios.post('/api/auth/register', userData);
-      const { token: newToken, user: newUser } = response.data;
-      
-      setToken(newToken);
-      setUser(newUser);
-      localStorage.setItem('token', newToken);
-      
-      toast.success('Registration successful!');
-      return { success: true };
+      await logoutUser();
+      setCurrentUser(null);
+      setUserData(null);
     } catch (error) {
-      const message = error.response?.data?.message || 'Registration failed';
-      toast.error(message);
-      return { success: false, error: message };
+      console.error('Logout error:', error);
     }
   };
 
-  // Login user
-  const login = async (credentials) => {
-    try {
-      const response = await axios.post('/api/auth/login', credentials);
-      const { token: newToken, user: newUser } = response.data;
-      
-      setToken(newToken);
-      setUser(newUser);
-      localStorage.setItem('token', newToken);
-      
-      toast.success('Login successful!');
-      return { success: true };
-    } catch (error) {
-      const message = error.response?.data?.message || 'Login failed';
-      toast.error(message);
-      return { success: false, error: message };
-    }
-  };
-
-  // Anonymous login
-  const anonymousLogin = async (username) => {
-    try {
-      const response = await axios.post('/api/auth/anonymous', { username });
-      const { token: newToken, user: newUser } = response.data;
-      
-      setToken(newToken);
-      setUser(newUser);
-      localStorage.setItem('token', newToken);
-      
-      toast.success('Welcome to Fact Buster!');
-      return { success: true };
-    } catch (error) {
-      const message = error.response?.data?.message || 'Anonymous login failed';
-      toast.error(message);
-      return { success: false, error: message };
-    }
-  };
-
-  // Logout user
-  const logout = () => {
-    setUser(null);
-    setToken(null);
-    localStorage.removeItem('token');
-    toast.success('Logged out successfully');
-  };
-
-  // Update user profile
-  const updateProfile = async (profileData) => {
-    try {
-      const response = await axios.put('/api/auth/profile', profileData);
-      setUser(response.data);
-      toast.success('Profile updated successfully!');
-      return { success: true };
-    } catch (error) {
-      const message = error.response?.data?.message || 'Profile update failed';
-      toast.error(message);
-      return { success: false, error: message };
-    }
+  const updateUserData = (newData) => {
+    setUserData(prev => ({
+      ...prev,
+      ...newData
+    }));
   };
 
   const value = {
-    user,
+    currentUser,
+    userData,
     loading,
-    token,
-    register,
-    login,
-    anonymousLogin,
     logout,
-    updateProfile,
+    updateUserData,
+    isAuthenticated: !!currentUser,
+    isEmailVerified: currentUser?.emailVerified || false
   };
 
   return (

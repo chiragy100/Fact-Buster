@@ -1,94 +1,137 @@
-import React from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider, useAuth } from './contexts/AuthContext';
-import { SocketProvider } from './contexts/SocketContext';
+import React, { Suspense } from 'react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { Toaster } from 'react-hot-toast';
 import { GameProvider } from './contexts/GameContext';
-
-// Components
+import { SocketProvider } from './contexts/SocketContext';
+import { AuthProvider } from './contexts/AuthContext';
 import Navbar from './components/Navbar';
 import Home from './pages/Home';
-import Login from './pages/Login';
-import Register from './pages/Register';
-import SoloGame from './pages/SoloGame';
-import MultiplayerGame from './pages/MultiplayerGame';
+import Categories from './pages/Categories';
 import GameLobby from './pages/GameLobby';
-import Leaderboard from './pages/Leaderboard';
+import SoloGame from './pages/SoloGame';
+import AnswerPage from './pages/AnswerPage';
+import MultiplayerGame from './pages/MultiplayerGame';
+import MultiplayerGameRoom from './pages/MultiplayerGameRoom';
 import Profile from './pages/Profile';
+import Leaderboard from './pages/Leaderboard';
+import Signup from './pages/Signup';
+import Login from './pages/Login';
+import VerifyEmail from './pages/VerifyEmail';
+import VerifyEmailPending from './pages/VerifyEmailPending';
+import Dashboard from './pages/Dashboard';
+import ComingSoon from './pages/ComingSoon';
 import LoadingSpinner from './components/LoadingSpinner';
+import ProtectedRoute from './components/ProtectedRoute';
+import useScrollToTop from './hooks/useScrollToTop';
+import './index.css';
 
-// Protected Route Component
-const ProtectedRoute = ({ children }) => {
-  const { user, loading } = useAuth();
-  
-  if (loading) {
-    return <LoadingSpinner />;
+// Error Boundary Component
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
   }
-  
-  return user ? children : <Navigate to="/login" />;
-};
 
-// App Routes Component
-const AppRoutes = () => {
-  const { user } = useAuth();
+  static getDerivedStateFromError(error) {
+    return { hasError: true };
+  }
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500">
-      <Navbar />
-      <main className="container mx-auto px-4 py-8">
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/login" element={user ? <Navigate to="/" /> : <Login />} />
-          <Route path="/register" element={user ? <Navigate to="/" /> : <Register />} />
-          <Route 
-            path="/solo" 
-            element={
-              <ProtectedRoute>
-                <SoloGame />
-              </ProtectedRoute>
-            } 
-          />
-          <Route 
-            path="/multiplayer" 
-            element={
-              <ProtectedRoute>
-                <MultiplayerGame />
-              </ProtectedRoute>
-            } 
-          />
-          <Route 
-            path="/lobby/:gameId" 
-            element={
-              <ProtectedRoute>
-                <GameLobby />
-              </ProtectedRoute>
-            } 
-          />
-          <Route path="/leaderboard" element={<Leaderboard />} />
-          <Route 
-            path="/profile" 
-            element={
-              <ProtectedRoute>
-                <Profile />
-              </ProtectedRoute>
-            } 
-          />
-          <Route path="*" element={<Navigate to="/" />} />
-        </Routes>
-      </main>
+  componentDidCatch(error, errorInfo) {
+    console.error('Error caught by boundary:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900 flex items-center justify-center">
+          <div className="text-center text-white">
+            <h1 className="text-2xl font-bold mb-4">Something went wrong</h1>
+            <p className="mb-4">Please refresh the page and try again.</p>
+            <button
+              onClick={() => window.location.reload()}
+              className="bg-blue-500 hover:bg-blue-600 px-4 py-2 rounded-lg transition-colors"
+            >
+              Refresh Page
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+// Loading Component
+const LoadingFallback = () => (
+  <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900 flex items-center justify-center">
+    <div className="text-center text-white">
+      <LoadingSpinner />
+      <p className="mt-4">Loading Fact Buster...</p>
     </div>
-  );
+  </div>
+);
+
+// Scroll to top component
+const ScrollToTop = () => {
+  useScrollToTop();
+  return null;
 };
 
-// Main App Component
 function App() {
   return (
-    <AuthProvider>
-      <SocketProvider>
-        <GameProvider>
-          <AppRoutes />
-        </GameProvider>
-      </SocketProvider>
-    </AuthProvider>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <AuthProvider>
+          <ScrollToTop />
+          <Suspense fallback={<LoadingFallback />}>
+            <GameProvider>
+              <SocketProvider>
+                <div className="App min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900">
+                  <Navbar />
+                                  <Routes>
+                  <Route path="/" element={<Home />} />
+                  <Route path="/signup" element={<Signup />} />
+                  <Route path="/login" element={<Login />} />
+                  <Route path="/verify-email" element={<VerifyEmail />} />
+                  <Route path="/verify-email-pending" element={<VerifyEmailPending />} />
+                  <Route path="/dashboard" element={<Dashboard />} />
+                  <Route path="/categories" element={<Categories />} />
+                  <Route path="/game-lobby" element={
+                    <ProtectedRoute>
+                      <GameLobby />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/solo-game" element={<SoloGame />} />
+                  <Route path="/answer" element={<AnswerPage />} />
+                  <Route path="/multiplayer" element={<MultiplayerGame />} />
+                  <Route path="/multiplayer-room" element={<MultiplayerGameRoom />} />
+                  <Route path="/profile" element={
+                    <ProtectedRoute>
+                      <Profile />
+                    </ProtectedRoute>
+                  } />
+                  <Route path="/leaderboard" element={<Leaderboard />} />
+                  <Route path="/coming-soon" element={<ComingSoon />} />
+                </Routes>
+                  <Toaster
+                    position="top-right"
+                    toastOptions={{
+                      duration: 4000,
+                      style: {
+                        background: '#1f2937',
+                        color: '#fff',
+                        border: '1px solid rgba(255, 255, 255, 0.1)',
+                      },
+                    }}
+                  />
+                </div>
+              </SocketProvider>
+            </GameProvider>
+          </Suspense>
+        </AuthProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }
 
