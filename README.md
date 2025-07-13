@@ -119,7 +119,7 @@ npm start
 
 # Or start individually:
 # Backend (from server directory)
-cd server && npm start
+cd server && npm start (I did face some erros with this command so might need the alternate command for this which for me was: cd client; npm start)
 
 # Frontend (from client directory)
 cd client && npm start
